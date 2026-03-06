@@ -5,7 +5,6 @@ from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage, ImageSendMessage
 from openai import OpenAI
-import datetime
 from datetime import datetime, timedelta
 import matplotlib
 matplotlib.use('Agg')
@@ -39,12 +38,11 @@ gs_client = gspread.authorize(creds)
 sheet = gs_client.open("家計簿くんデータ").sheet1 
 
 def clean_val(text):
-    text = str(text)
+    text = str(text).replace('項目:', '').replace('カテゴリ:', '').replace('金額:', '')
     if ":" in text: text = text.split(":")[-1]
     if "：" in text: text = text.split("：")[-1]
     return text.replace('円', '').replace(',', '').strip()
 
-# --- グラフ作成（金額表示付き） ---
 def create_pie_chart(data, title_text):
     category_totals = {}
     for record in data:
@@ -57,16 +55,17 @@ def create_pie_chart(data, title_text):
 
     if not category_totals: return None
 
-    # ラベルに金額を含める（例：食費\n5,000円）
+    # 金額とパーセントを両方表示するためのラベル作成
     labels = [f"{k}\n{v:,}円" for k, v in category_totals.items()]
     values = list(category_totals.values())
 
     plt.figure(figsize=(7, 7))
-    plt.pie(values, labels=labels, autopct='%1.1f%%', startangle=140, counterclock=False)
-    plt.title(title_text, fontsize=15)
+    # startangle=90, counterclock=False で時計回りに配置
+    plt.pie(values, labels=labels, autopct='%1.1f%%', startangle=90, counterclock=False, shadow=False)
+    plt.title(title_text, fontsize=16)
 
     buf = io.BytesIO()
-    plt.savefig(buf, format='png')
+    plt.savefig(buf, format='png', bbox_inches='tight')
     buf.seek(0)
     plt.close()
     return buf
@@ -77,86 +76,97 @@ def handle_message(event):
         user_message = event.message.text
         today = datetime.now()
 
-        # 1. 意図解析（期間の抽出を強化）
-        intent_prompt = f"""
-        以下のメッセージの意図を分析し「意図,キーワード,期間」で返して。
-        期間は (this_month, last_month, all, today) のいずれかに分類して。
+        # --- AIへの問い合わせ（1回に集約して高速化） ---
+        prompt = f"""
+        以下のメッセージを分析し、支出の記録(RECORD)、合計の確認(TOTAL)、グラフ表示(GRAPH)のいずれか判定して。
+        支出記録なら『RECORD,項目,カテゴリ,金額』
+        合計なら『TOTAL,なし,期間』
+        グラフなら『GRAPH,なし,期間』
+        の形式で1行で返して。
+        カテゴリは(食費,日用品,交際費,交通費,固定費,美容・衣服,その他)から選択。
+        期間は(this_month, last_month, all, today)から選択。
         メッセージ：{user_message}
         """
-        intent_res = client.chat.completions.create(
+        
+        res = client.chat.completions.create(
             model="gpt-4o-mini",
-            messages=[{"role": "user", "content": intent_prompt}]
+            messages=[{"role": "user", "content": prompt}]
         )
-        intent_raw = intent_res.choices[0].message.content.strip().split('\n')[-1]
-        intent_data = intent_raw.split(',')
-        intent = intent_data[0].strip()
-        period = intent_data[2].strip() if len(intent_data) > 2 else "this_month"
+        ai_raw = res.choices[0].message.content.strip().split('\n')[-1]
+        data_parts = [p.strip() for p in ai_raw.split(',')]
+        
+        intent = data_parts[0] # RECORD or TOTAL or GRAPH
 
-        if "graph" in intent or "グラフ" in user_message or "内訳" in user_message:
-            intent = "graph"
-
-        # --- 2. グラフ表示（期間絞り込み対応） ---
-        if intent == "graph":
+        # --- 1. グラフ(GRAPH) または 合計(TOTAL) の処理 ---
+        if intent in ["GRAPH", "TOTAL"] or "グラフ" in user_message:
+            period = data_parts[2] if len(data_parts) > 2 else "this_month"
             all_records = sheet.get_all_records()
             filtered_data = []
             title_text = "支出内訳"
 
             for r in all_records:
                 try:
-                    rec_date = datetime.strptime(str(r['日付']), '%Y/%m/%d')
+                    # スプレッドシートの日付形式に合わせてパース
+                    r_date_str = str(r.get('日付', '')).split(' ')[0]
+                    rec_date = datetime.strptime(r_date_str, '%Y/%m/%d')
+                    
                     if period == "today" and rec_date.date() == today.date():
                         filtered_data.append(r)
                         title_text = "本日の支出"
                     elif period == "last_month":
-                        last_month = today.replace(day=1) - timedelta(days=1)
-                        if rec_date.year == last_month.year and rec_date.month == last_month.month:
+                        lm = today.replace(day=1) - timedelta(days=1)
+                        if rec_date.year == lm.year and rec_date.month == lm.month:
                             filtered_data.append(r)
                         title_text = "先月の支出"
                     elif period == "all":
                         filtered_data.append(r)
                         title_text = "全期間の支出"
-                    else: # デフォルトは今月
+                    else: # this_month
                         if rec_date.year == today.year and rec_date.month == today.month:
                             filtered_data.append(r)
                         title_text = "今月の支出"
                 except: continue
 
-            chart_buf = create_pie_chart(filtered_data, title_text)
-            if chart_buf:
-                os.makedirs("static", exist_ok=True)
-                filepath = os.path.join("static", "graph.png")
-                with open(filepath, "wb") as f:
-                    f.write(chart_buf.getbuffer())
+            if intent == "GRAPH" or "グラフ" in user_message:
+                chart_buf = create_pie_chart(filtered_data, title_text)
+                if chart_buf:
+                    os.makedirs("static", exist_ok=True)
+                    filename = f"graph_{int(today.timestamp())}.png"
+                    filepath = os.path.join("static", filename)
+                    with open(filepath, "wb") as f:
+                        f.write(chart_buf.getbuffer())
 
-                image_url = f"https://{request.host}/static/graph.png?{int(today.timestamp())}"
-                line_bot_api.reply_message(event.reply_token, ImageSendMessage(original_content_url=image_url, preview_image_url=image_url))
-            else:
-                line_bot_api.reply_message(event.reply_token, TextSendMessage(text=f"{title_text}のデータがないよ"))
-            return
-
-        # --- 3. 支出記録（カテゴリー推論を強化） ---
-        else:
-            record_prompt = f"""
-            以下のメッセージから「項目,カテゴリ,金額」を抽出して。
-            カテゴリは(食費, 日用品, 交際費, 交通費, 固定費, 美容・衣服, その他)から最適なものを選んで。
-            メッセージ：{user_message}
-            返信形式：項目,カテゴリ,金額（例：コーヒー,食費,450）
-            """
-            ai_res = client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[{"role": "user", "content": record_prompt}]
-            )
-            ai_data = ai_res.choices[0].message.content.strip().split('\n')[-1]
-            parts = ai_data.split(',')
-            item = clean_val(parts[0])
-            category = clean_val(parts[1]) if len(parts) > 1 else "その他"
-            amount = clean_val(parts[2]) if len(parts) > 2 else "0"
+                    base_url = f"https://{request.host}/"
+                    image_url = f"{base_url}static/{filename}"
+                    line_bot_api.reply_message(event.reply_token, ImageSendMessage(original_content_url=image_url, preview_image_url=image_url))
+                else:
+                    line_bot_api.reply_message(event.reply_token, TextSendMessage(text=f"{title_text}のデータがないよ"))
             
-            sheet.append_row([today.strftime('%Y/%m/%d'), item, category, amount])
+            else: # TOTAL
+                total_sum = sum(int(clean_val(r.get('金額', 0))) for r in filtered_data)
+                line_bot_api.reply_message(event.reply_token, TextSendMessage(text=f"📊 {title_text}の合計は {total_sum:,}円 だよ！"))
+
+        # --- 2. 記録(RECORD) の処理 ---
+        else:
+            item = clean_val(data_parts[1])
+            category = clean_val(data_parts[2]) if len(data_parts) > 2 else "その他"
+            amount = clean_val(data_parts[3]) if len(data_parts) > 3 else "0"
+            
+            today_str = today.strftime('%Y/%m/%d')
+            sheet.append_row([today_str, item, category, amount])
             line_bot_api.reply_message(event.reply_token, TextSendMessage(text=f"✅ 記録したよ！\n{item} ({category}): {amount}円"))
 
     except Exception as e:
-        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=f"エラー：{str(e)}"))
+        print(f"Error: {e}") # Renderのログに出力
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text="ちょっと調子が悪いみたい。時間を置いて試してみてね。"))
+
+@app.route("/callback", methods=['POST'])
+def callback():
+    signature = request.headers['X-Line-Signature']
+    body = request.get_data(as_text=True)
+    try: handler.handle(body, signature)
+    except InvalidSignatureError: abort(400)
+    return 'OK'
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
