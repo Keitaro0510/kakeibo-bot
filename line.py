@@ -43,6 +43,35 @@ gs_client = gspread.authorize(creds)
 # スプレッドシートの名前を正確に入力してください
 sheet = gs_client.open("家計簿くんデータ").sheet1 
 # ------------------------------------------
+def create_pie_chart(data):
+    # カテゴリごとの合計を計算
+    category_totals = {}
+    for record in data:
+        cat = record['カテゴリ']
+        try:
+            amt = int(record['金額'])
+            category_totals[cat] = category_totals.get(cat, 0) + amt
+        except:
+            continue
+
+    if not category_totals:
+        return None
+
+    # グラフの作成
+    labels = list(category_totals.keys())
+    values = list(category_totals.values())
+
+    plt.figure(figsize=(6, 6))
+    plt.pie(values, labels=labels, autopct='%1.1f%%', startangle=140, shadow=True)
+    plt.title("今月の支出内訳")
+
+    # 画像をメモリ上に保存（ファイルとして保存せず、データとして扱う）
+    buf = io.BytesIO()
+    plt.savefig(buf, format='png')
+    buf.seek(0)
+    plt.close()
+    return buf
+# ------------------------------------------
 
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
@@ -56,6 +85,7 @@ def handle_message(event):
     【意図の種類】
     - record: 支出を記録したい場合（例：ラーメン 900円）
     - total: 合計を知りたい場合（例：今月の食費は？、コンビニでいくら使った？）
+    - graph: 支出のグラフ（円グラフ）を見たい場合（例：グラフ見せて、内訳教えて）
 
     【期間の種類】
     - this_month, last_month, this_week, all
@@ -108,6 +138,27 @@ def handle_message(event):
             reply_text = f"🔍 {res_period}の{res_key}に関するデータは見つからなかったよ。"
         
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
+        return
+    # --- ステップ 2.5: 「グラフ(graph)」の場合の処理 ---
+    elif intent == "graph":
+        all_records = sheet.get_all_records()
+        # 今月のデータだけ抽出
+        this_month_data = []
+        for record in all_records:
+            try:
+                rec_date = datetime.strptime(record['日付'], '%Y/%m/%d')
+                if rec_date.year == today.year and rec_date.month == today.month:
+                    this_month_data.append(record)
+            except: continue
+
+        chart_buf = create_pie_chart(this_month_data)
+        
+        if chart_buf:
+            # 本来は画像をオンライン上に保存してURLを送る必要がありますが、
+            # まずは「グラフが作成できたよ！」というメッセージを返すところまで作りましょう。
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="📊 グラフを作成したよ！(※画像をLINEで送るには追加の設定が必要です)"))
+        else:
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="データがなくてグラフが作れなかったよ。"))
         return
 
     # --- ステップ3: 「記録(record)」の場合の処理（昨日のAI記録コード） ---
@@ -162,4 +213,5 @@ def callback():
 if __name__ == "__main__":
 
     app.run(port=5000)
+
 
