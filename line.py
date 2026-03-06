@@ -2,18 +2,19 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from flask import Flask, request, abort
 from linebot import LineBotApi, WebhookHandler
-from linebot.models import MessageEvent, TextMessage, TextSendMessage
+from linebot.exceptions import InvalidSignatureError # 追加
+from linebot.models import MessageEvent, TextMessage, TextSendMessage, ImageSendMessage # ImageSendMessageを追加
 from openai import OpenAI
-import datetime
-from datetime import datetime, timedelta
+import datetime # ここはこれだけでOK
+from datetime import datetime, timedelta # これも残してOKですが、使い分けに注意
 import matplotlib.pyplot as plt
 import japanize_matplotlib
 import io
+import os
+import json
+from dotenv import load_dotenv
 
 app = Flask(__name__)
-
-import os
-from dotenv import load_dotenv
 
 # .envファイルから環境変数を読み込む
 load_dotenv()
@@ -24,7 +25,6 @@ handler = WebhookHandler(os.getenv('LINE_CHANNEL_SECRET'))
 client = OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
 # ------------------------------------------
 
-import json
 
 # Googleスプレッドシートの設定
 scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
@@ -76,24 +76,19 @@ def create_pie_chart(data):
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
     user_message = event.message.text
-    today = datetime.now()
+    today = datetime.now() # ここでエラーが出ていた可能性あり
 
-    # --- ステップ1: AIに「ユーザーの意図」を解析させる ---
+    # --- AIによる意図解析 ---
     intent_prompt = f"""
     以下のメッセージの意図を分析し、結果を必ず「意図,キーワード,期間」の形式で1行で返して。
     
     【意図の種類】
-    - record: 支出を記録したい場合（例：ラーメン 900円）
-    - total: 合計を知りたい場合（例：今月の食費は？、コンビニでいくら使った？）
-    - graph: 支出のグラフ（円グラフ）を見たい場合（例：グラフ見せて、内訳教えて）
+    - record: 支出を記録したい場合
+    - total: 合計を知りたい場合
+    - graph: 支出のグラフを見たい場合（例：グラフ見せて、内訳教えて）
 
     【期間の種類】
     - this_month, last_month, this_week, all
-
-    【出力例】
-    - 記録なら: record,なし,なし
-    - 集計なら: total,コンビニ,this_month
-    - 集計なら: total,食費,last_month
 
     メッセージ: {user_message}
     """
@@ -102,47 +97,16 @@ def handle_message(event):
         model="gpt-4o-mini",
         messages=[{"role": "user", "content": intent_prompt}]
     )
+    
     intent_data = intent_res.choices[0].message.content.strip().split(',')
-    intent, keyword, period = intent_data[0], intent_data[1], intent_data[2]
+    if len(intent_data) < 3: # 念のためのガード
+        intent, keyword, period = "record", "なし", "なし"
+    else:
+        intent, keyword, period = intent_data[0].strip(), intent_data[1].strip(), intent_data[2].strip()
 
-    # --- ステップ2: 「集計(total)」の場合の処理 ---
-    if intent == "total":
+    # --- グラフ(graph)の処理 ---
+    if intent == "graph":
         all_records = sheet.get_all_records()
-        total = 0
-        match_count = 0
-        
-        for record in all_records:
-            try:
-                rec_date = datetime.strptime(record['日付'], '%Y/%m/%d')
-                # 期間フィルタ
-                if period == "this_month" and not (rec_date.year == today.year and rec_date.month == today.month): continue
-                if period == "last_month":
-                    lm = today.replace(day=1) - timedelta(days=1)
-                    if not (rec_date.year == lm.year and rec_date.month == lm.month): continue
-                
-                # キーワードフィルタ（項目名かカテゴリに含まれているか）
-                if keyword != "なし":
-                    if keyword not in record['項目'] and keyword not in record['カテゴリ']:
-                        continue
-
-                total += int(record['金額'])
-                match_count += 1
-            except: continue
-
-        res_period = {"this_month":"今月", "last_month":"先月", "this_week":"今週", "all":"全期間", "なし":""}[period]
-        res_key = f"【{keyword}】" if keyword != "なし" else "全部"
-        
-        if match_count > 0:
-            reply_text = f"📊 {res_period}の{res_key}合計は {total:,}円 だよ！({match_count}件)"
-        else:
-            reply_text = f"🔍 {res_period}の{res_key}に関するデータは見つからなかったよ。"
-        
-        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
-        return
-    # --- ステップ 2.5: 「グラフ(graph)」の場合の処理 ---
-    elif intent == "graph":
-        all_records = sheet.get_all_records()
-        # 今月のデータだけ抽出
         this_month_data = []
         for record in all_records:
             try:
@@ -154,11 +118,28 @@ def handle_message(event):
         chart_buf = create_pie_chart(this_month_data)
         
         if chart_buf:
-            # 本来は画像をオンライン上に保存してURLを送る必要がありますが、
-            # まずは「グラフが作成できたよ！」というメッセージを返すところまで作りましょう。
-            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="📊 グラフを作成したよ！(※画像をLINEで送るには追加の設定が必要です)"))
+            # まだ画像送信URLがないので、テキストで成功確認
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="📊 グラフデータは作成できました！次は画像として送る設定をしましょう。"))
         else:
-            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="データがなくてグラフが作れなかったよ。"))
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="今月のデータが見つからないので、グラフが作れませんでした。"))
+        return
+
+    # --- 合計(total)の処理 ---
+    elif intent == "total":
+        all_records = sheet.get_all_records()
+        total = 0
+        match_count = 0
+        for record in all_records:
+            try:
+                rec_date = datetime.strptime(record['日付'], '%Y/%m/%d')
+                if period == "this_month" and not (rec_date.year == today.year and rec_date.month == today.month): continue
+                if keyword != "なし" and (keyword not in str(record.get('項目','')) and keyword not in str(record.get('カテゴリ',''))): continue
+                total += int(record['金額'])
+                match_count += 1
+            except: continue
+        
+        reply_text = f"📊 合計は {total:,}円 だよ！({match_count}件)"
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
         return
 
     # --- ステップ3: 「記録(record)」の場合の処理（昨日のAI記録コード） ---
@@ -213,5 +194,6 @@ def callback():
 if __name__ == "__main__":
 
     app.run(port=5000)
+
 
 
