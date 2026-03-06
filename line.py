@@ -131,10 +131,11 @@ def handle_message(event):
     try:
         # AIの回答を分割してスプレッドシートに書き込み
         item, category, amount = ai_data.split(',')
-        today = datetime.date.today().strftime('%Y/%m/%d')
-        
+        # datetime.now() を使って日付を作る
+        today_str = datetime.now().strftime('%Y/%m/%d')
+
         # スプレッドシートの末尾に追加
-        sheet.append_row([today, item, category, amount])
+        sheet.append_row([today_str, item, category, amount])
         
         reply_text = f"✅ 記録したよ！\n日付: {today}\n項目: {item}\nカテゴリ: {category}\n金額: {amount}円"
     except Exception as e:
@@ -156,4 +157,5 @@ def callback():
     return 'OK'
 
 if __name__ == "__main__":
+
     app.run(port=5000)
