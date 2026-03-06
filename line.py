@@ -6,6 +6,9 @@ from linebot.models import MessageEvent, TextMessage, TextSendMessage
 from openai import OpenAI
 import datetime
 from datetime import datetime, timedelta
+import matplotlib.pyplot as plt
+import japanize_matplotlib
+import io
 
 app = Flask(__name__)
 
@@ -159,3 +162,4 @@ def callback():
 if __name__ == "__main__":
 
     app.run(port=5000)
+
