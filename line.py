@@ -82,6 +82,10 @@ def handle_message(event):
     )
     intent_data = intent_res.choices[0].message.content.strip().split(',')
     intent = intent_data[0].strip()
+    # --- 【ここから追加！】AIの判定がブレても強制的にグラフモードにする ---
+    if "graph" in intent or "グラフ" in user_message or "内訳" in user_message:
+        intent = "graph"
+    # ------------------------------------------------------------------
     keyword = intent_data[1].strip() if len(intent_data) > 1 else "なし"
     period = intent_data[2].strip() if len(intent_data) > 2 else "なし"
 
@@ -145,8 +149,14 @@ def handle_message(event):
         ai_data = response.choices[0].message.content.strip()
         try:
             item, category, amount = ai_data.split(',')
+            
+            # --- 【追加】金額から「円」や「,」を消して数字だけにする ---
+            amount = amount.replace('円', '').replace(',', '').strip()
+            
             today_str = today.strftime('%Y/%m/%d')
             sheet.append_row([today_str, item, category, amount])
+            
+            # 返信メッセージ側もスッキリさせる
             reply_text = f"✅ 記録したよ！\n日付: {today_str}\n項目: {item}\nカテゴリ: {category}\n金額: {amount}円"
         except:
             reply_text = f"エラー：{ai_data}"
@@ -162,3 +172,4 @@ def callback():
 
 if __name__ == "__main__":
     app.run(port=5000)
+
