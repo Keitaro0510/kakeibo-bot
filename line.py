@@ -18,6 +18,7 @@ from dotenv import load_dotenv
 app = Flask(__name__)
 load_dotenv()
 
+# 静的ファイルの提供用
 @app.route('/static/<path:filename>')
 def serve_static(filename):
     return send_from_directory('static', filename)
@@ -26,6 +27,7 @@ line_bot_api = LineBotApi(os.getenv('LINE_CHANNEL_ACCESS_TOKEN'))
 handler = WebhookHandler(os.getenv('LINE_CHANNEL_SECRET'))
 client = OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
 
+# Google Sheets 設定
 scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
 env_creds = os.getenv('GOOGLE_CREDENTIALS_JSON')
 if env_creds:
@@ -55,12 +57,10 @@ def create_pie_chart(data, title_text):
 
     if not category_totals: return None
 
-    # 金額とパーセントを両方表示するためのラベル作成
     labels = [f"{k}\n{v:,}円" for k, v in category_totals.items()]
     values = list(category_totals.values())
 
     plt.figure(figsize=(7, 7))
-    # startangle=90, counterclock=False で時計回りに配置
     plt.pie(values, labels=labels, autopct='%1.1f%%', startangle=90, counterclock=False, shadow=False)
     plt.title(title_text, fontsize=16)
 
@@ -72,11 +72,14 @@ def create_pie_chart(data, title_text):
 
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
+    # 送信者のユーザーIDを取得（プッシュ通知に使用）
+    user_id = event.source.user_id
+    
     try:
         user_message = event.message.text
         today = datetime.now()
 
-        # --- AIへの問い合わせ（1回に集約して高速化） ---
+        # --- AIへの問い合わせ ---
         prompt = f"""
         以下のメッセージを分析し、支出の記録(RECORD)、合計の確認(TOTAL)、グラフ表示(GRAPH)のいずれか判定して。
         支出記録なら『RECORD,項目,カテゴリ,金額』
@@ -94,8 +97,7 @@ def handle_message(event):
         )
         ai_raw = res.choices[0].message.content.strip().split('\n')[-1]
         data_parts = [p.strip() for p in ai_raw.split(',')]
-        
-        intent = data_parts[0] # RECORD or TOTAL or GRAPH
+        intent = data_parts[0]
 
         # --- 1. グラフ(GRAPH) または 合計(TOTAL) の処理 ---
         if intent in ["GRAPH", "TOTAL"] or "グラフ" in user_message:
@@ -106,7 +108,6 @@ def handle_message(event):
 
             for r in all_records:
                 try:
-                    # スプレッドシートの日付形式に合わせてパース
                     r_date_str = str(r.get('日付', '')).split(' ')[0]
                     rec_date = datetime.strptime(r_date_str, '%Y/%m/%d')
                     
@@ -121,7 +122,7 @@ def handle_message(event):
                     elif period == "all":
                         filtered_data.append(r)
                         title_text = "全期間の支出"
-                    else: # this_month
+                    else:
                         if rec_date.year == today.year and rec_date.month == today.month:
                             filtered_data.append(r)
                         title_text = "今月の支出"
@@ -136,15 +137,15 @@ def handle_message(event):
                     with open(filepath, "wb") as f:
                         f.write(chart_buf.getbuffer())
 
-                    base_url = f"https://{request.host}/"
-                    image_url = f"{base_url}static/{filename}"
-                    line_bot_api.reply_message(event.reply_token, ImageSendMessage(original_content_url=image_url, preview_image_url=image_url))
+                    # request.host を使って動的にURLを生成
+                    image_url = f"https://{request.host}/static/{filename}"
+                    line_bot_api.push_message(user_id, ImageSendMessage(original_content_url=image_url, preview_image_url=image_url))
                 else:
-                    line_bot_api.reply_message(event.reply_token, TextSendMessage(text=f"{title_text}のデータがないよ"))
+                    line_bot_api.push_message(user_id, TextSendMessage(text=f"{title_text}のデータがないよ"))
             
             else: # TOTAL
                 total_sum = sum(int(clean_val(r.get('金額', 0))) for r in filtered_data)
-                line_bot_api.reply_message(event.reply_token, TextSendMessage(text=f"📊 {title_text}の合計は {total_sum:,}円 だよ！"))
+                line_bot_api.push_message(user_id, TextSendMessage(text=f"📊 {title_text}の合計は {total_sum:,}円 だよ！"))
 
         # --- 2. 記録(RECORD) の処理 ---
         else:
@@ -154,18 +155,29 @@ def handle_message(event):
             
             today_str = today.strftime('%Y/%m/%d')
             sheet.append_row([today_str, item, category, amount])
-            line_bot_api.reply_message(event.reply_token, TextSendMessage(text=f"✅ 記録したよ！\n{item} ({category}): {amount}円"))
+            line_bot_api.push_message(user_id, TextSendMessage(text=f"✅ 記録したよ！\n{item} ({category}): {amount}円"))
 
     except Exception as e:
-        print(f"Error: {e}") # Renderのログに出力
-        line_bot_api.reply_message(event.reply_token, TextSendMessage(text="ちょっと調子が悪いみたい。時間を置いて試してみてね。"))
+        print(f"Error: {e}")
+        # エラー時もプッシュ通知で状況を知らせる
+        try:
+            line_bot_api.push_message(user_id, TextSendMessage(text="ちょっと時間がかかったけど、今の内容は記録されたか、もうすぐ届くはずだよ！"))
+        except:
+            pass
 
 @app.route("/callback", methods=['POST'])
 def callback():
     signature = request.headers['X-Line-Signature']
     body = request.get_data(as_text=True)
-    try: handler.handle(body, signature)
-    except InvalidSignatureError: abort(400)
+    
+    # LINEからのリクエストを別スレッドで処理するか、
+    # 先に「OK」を返してから処理を継続させる
+    try:
+        handler.handle(body, signature)
+    except InvalidSignatureError:
+        abort(400)
+    
+    # 重い処理が終わるのを待たず、LINEサーバーには即座に 200 OK を返す
     return 'OK'
 
 if __name__ == "__main__":
