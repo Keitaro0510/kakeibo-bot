@@ -52,20 +52,28 @@ def clean_val(text):
     return text.replace('円', '').replace(',', '').strip()
 
 def create_pie_chart(data, title_text):
-    category_totals = {}
+    # データの集計先を動的に変える（絞り込みがある場合は「項目」、ない場合は「カテゴリ」）
+    # フィルタリングされたデータが特定のカテゴリのみなら、項目名で集計した方が見やすい
+    target_key = '項目' if '【' in title_text else 'カテゴリ'
+    
+    label_totals = {}
     for record in data:
-        cat = clean_val(record.get('カテゴリ', 'その他'))
+        key = clean_val(record.get(target_key, 'その他'))
         try:
             amt = int(clean_val(record.get('金額', 0)))
             if amt > 0:
-                category_totals[cat] = category_totals.get(cat, 0) + amt
+                label_totals[key] = label_totals.get(key, 0) + amt
         except: continue
-    if not category_totals: return None
-    labels = [f"{k}\n{v:,}円" for k, v in category_totals.items()]
-    values = list(category_totals.values())
+
+    if not label_totals: return None
+
+    labels = [f"{k}\n{v:,}円" for k, v in label_totals.items()]
+    values = list(label_totals.values())
+
     plt.figure(figsize=(7, 7))
-    plt.pie(values, labels=labels, autopct='%1.1f%%', startangle=90, counterclock=False, shadow=False)
+    plt.pie(values, labels=labels, autopct='%1.1f%%', startangle=90, counterclock=False)
     plt.title(title_text, fontsize=16)
+
     buf = io.BytesIO()
     plt.savefig(buf, format='png', bbox_inches='tight')
     buf.seek(0)
@@ -170,4 +178,5 @@ def callback():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
+
 
