@@ -154,15 +154,49 @@ def handle_message(event):
                 line_bot_api.push_message(user_id, TextSendMessage(text=f"📊 {title_text}の合計は {total_sum:,}円 だよ！"))
 
         else:
-            # 記録(RECORD)の処理（既存と同じ）
+            # --- 記録(RECORD)の処理 ---
             item = clean_val(data_parts[1])
             category = clean_val(data_parts[2]) if len(data_parts) > 2 else "その他"
-            amount = clean_val(data_parts[3]) if len(data_parts) > 3 else "0"
+            amount_str = clean_val(data_parts[3]) if len(data_parts) > 3 else "0"
+            amount = int(amount_str)
+            
+            # シートに追記
             sheet.append_row([today.strftime('%Y/%m/%d'), item, category, amount])
-            line_bot_api.push_message(user_id, TextSendMessage(text=f"✅ 記録したよ！\n{item} ({category}): {amount}円"))
 
-    except Exception as e:
-        print(f"ERROR: {e}")
+            # --- 予算チェック機能を追加 ---
+            try:
+                # G1セルから予算を取得 (例: 50000)
+                budget = int(sheet.acell('G1').value.replace(',', ''))
+                
+                # 今月の全データを取得して合計を計算
+                all_records = sheet.get_all_records()
+                this_month_total = 0
+                for r in all_records:
+                    try:
+                        r_date = datetime.strptime(str(r.get('日付', '')).split(' ')[0], '%Y/%m/%d')
+                        if r_date.year == today.year and r_date.month == today.month:
+                            this_month_total += int(clean_val(r.get('金額', 0)))
+                    except: continue
+                
+                remaining = budget - this_month_total
+                
+                # 返信メッセージの作成
+                msg = f"✅ 記録したよ！\n{item} ({category}): {amount:,}円\n\n"
+                msg += f"📊 今月の合計: {this_month_total:,}円\n"
+                
+                if remaining > 0:
+                    msg += f"💰 今月の残予算: あと {remaining:,}円 だよ。頑張ろう！"
+                elif remaining == 0:
+                    msg += "⚠️ 予算ピッタリ使い切ったよ！"
+                else:
+                    msg += f"🚨 予算オーバー！ {abs(remaining):,}円 使いすぎてるよ！"
+                
+                line_bot_api.push_message(user_id, TextSendMessage(text=msg))
+
+            except Exception as e:
+                print(f"BUDGET ERROR: {e}")
+                # 予算取得に失敗しても記録完了だけは伝える
+                line_bot_api.push_message(user_id, TextSendMessage(text=f"✅ 記録したよ！\n{item}: {amount}円\n(予算取得に失敗しました)"))
 
 @app.route("/callback", methods=['POST'])
 def callback():
