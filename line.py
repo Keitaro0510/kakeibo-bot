@@ -76,11 +76,24 @@ def handle_message(event):
     
     try:
         today = datetime.now()
+        # AI判定（カテゴリの具体例を教えて学習させる）
         prompt = f"""
-        以下のメッセージを判定して。
+        あなたは優秀な家計簿オーガナイザーです。
+        メッセージから「支出項目」「カテゴリ」「金額」を抽出して。
+        
+        【カテゴリの例】
+        食費、日用品、交際費、交通費、趣味、衣服、美容、医療、住居、水道光熱、その他
+        
+        【判定ルール】
+        - ジュース、コンビニ、スーパー、外食は「食費」
+        - 洗剤、ティッシュ、ゴミ袋は「日用品」
+        - 電車、タクシー、バスは「交通費」
+        - 飲み会、プレゼント、デートは「交際費」
+        - 判断に迷うものは「その他」
+        
         支出記録なら『RECORD,項目,カテゴリ,金額』
         合計・グラフなら『TOTALかGRAPH,抽出カテゴリ(なければ"なし"),期間(this_month, last_month, all, today)』
-        の形式で1行で返して。
+        形式厳守。
         メッセージ：{user_message}
         """
         res = client.chat.completions.create(model="gpt-4o-mini", messages=[{"role": "user", "content": prompt}])
@@ -174,3 +187,4 @@ def callback():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
+
