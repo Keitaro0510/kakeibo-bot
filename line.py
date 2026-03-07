@@ -81,30 +81,54 @@ def handle_message(event):
     try:
         today = datetime.now()
 
-        # AI判定
-        prompt = f"支出記録(RECORD),合計(TOTAL),グラフ(GRAPH)判定。RECORDなら『RECORD,項目,カテゴリ,金額』。TOTAL/GRAPHなら『... ,なし,期間(this_month, last_month, all, today)』。形式厳守。メッセージ：{user_message}"
+        # AI判定（特定のカテゴリ抽出を追加）
+        prompt = f"""
+        以下のメッセージを判定して。
+        支出記録なら『RECORD,項目,カテゴリ,金額』
+        合計・グラフなら『TOTALかGRAPH,抽出カテゴリ(なければ"なし"),期間(this_month, last_month, all, today)』
+        の形式で1行で返して。
+        メッセージ：{user_message}
+        """
         res = client.chat.completions.create(model="gpt-4o-mini", messages=[{"role": "user", "content": prompt}])
         ai_raw = res.choices[0].message.content.strip().split('\n')[-1]
         data_parts = [p.strip() for p in ai_raw.split(',')]
         intent = data_parts[0]
 
         if intent in ["GRAPH", "TOTAL"] or "グラフ" in user_message:
+            # 抽出したい特定のカテゴリがあるか確認
+            target_category = data_parts[1] if len(data_parts) > 1 else "なし"
             period = data_parts[2] if len(data_parts) > 2 else "this_month"
+            
             all_records = sheet.get_all_records()
             filtered_data = []
             title_text = "支出内訳"
+
+            # 期間でフィルタリング
             for r in all_records:
                 try:
                     r_date_str = str(r.get('日付', '')).split(' ')[0]
                     rec_date = datetime.strptime(r_date_str, '%Y/%m/%d')
-                    if period == "today" and rec_date.date() == today.date(): filtered_data.append(r); title_text = "本日の支出"
+                    
+                    is_in_period = False
+                    if period == "today" and rec_date.date() == today.date(): is_in_period = True
                     elif period == "last_month":
                         lm = today.replace(day=1) - timedelta(days=1)
-                        if rec_date.year == lm.year and rec_date.month == lm.month: filtered_data.append(r); title_text = "先月の支出"
-                    elif period == "all": filtered_data.append(r); title_text = "全期間の支出"
-                    else:
-                        if rec_date.year == today.year and rec_date.month == today.month: filtered_data.append(r); title_text = "今月の支出"
+                        if rec_date.year == lm.year and rec_date.month == lm.month: is_in_period = True
+                    elif period == "all": is_in_period = True
+                    else: # this_month
+                        if rec_date.year == today.year and rec_date.month == today.month: is_in_period = True
+                    
+                    if is_in_period:
+                        # 特定のカテゴリ指定がある場合、さらに絞り込む
+                        rec_cat = clean_val(r.get('カテゴリ', ''))
+                        if target_category == "なし" or target_category in rec_cat or rec_cat in target_category:
+                            filtered_data.append(r)
                 except: continue
+
+            # メッセージのタイトルを調整
+            period_name = {"today":"本日", "last_month":"先月", "all":"全期間", "this_month":"今月"}.get(period, "今月")
+            cat_name = f"【{target_category}】" if target_category != "なし" else ""
+            title_text = f"{period_name}の{cat_name}支出"
 
             if intent == "GRAPH" or "グラフ" in user_message:
                 chart_buf = create_pie_chart(filtered_data, title_text)
@@ -122,19 +146,15 @@ def handle_message(event):
                 line_bot_api.push_message(user_id, TextSendMessage(text=f"📊 {title_text}の合計は {total_sum:,}円 だよ！"))
 
         else:
+            # 記録(RECORD)の処理（既存と同じ）
             item = clean_val(data_parts[1])
             category = clean_val(data_parts[2]) if len(data_parts) > 2 else "その他"
             amount = clean_val(data_parts[3]) if len(data_parts) > 3 else "0"
             sheet.append_row([today.strftime('%Y/%m/%d'), item, category, amount])
             line_bot_api.push_message(user_id, TextSendMessage(text=f"✅ 記録したよ！\n{item} ({category}): {amount}円"))
 
-    except LineBotApiError as e:
-        print(f"LINE API ERROR: {e.status_code} - {e.message}")
     except Exception as e:
-        print(f"GENERAL ERROR: {e}")
-        try:
-            line_bot_api.push_message(user_id, TextSendMessage(text="処理中にエラーが発生したみたい。ログを確認してね。"))
-        except: pass
+        print(f"ERROR: {e}")
 
 @app.route("/callback", methods=['POST'])
 def callback():
@@ -150,3 +170,4 @@ def callback():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
+
