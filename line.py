@@ -15,6 +15,7 @@ import os
 import json
 import base64
 from dotenv import load_dotenv
+import calendar  # 月の日数を取得するために追加
 
 app = Flask(__name__)
 load_dotenv()
@@ -69,6 +70,8 @@ def create_pie_chart(data, title_text):
     plt.close()
     return buf
 
+
+
 # 予算と合計を計算してメッセージを作る共通関数
 def get_budget_message(today, item, category, amount):
     try:
@@ -83,12 +86,34 @@ def get_budget_message(today, item, category, amount):
             except: continue
         
         remaining = budget - this_month_total
-        msg = f"✅ 記録したよ！\n{item} ({category}): {amount:,}円\n\n📊 今月の合計: {this_month_total:,}円\n"
-        if remaining > 0: msg += f"💰 残予算: あと {remaining:,}円"
-        elif remaining == 0: msg += "⚠️ 予算ピッタリ使い切った！"
-        else: msg += f"🚨 予算オーバー！ {abs(remaining):,}円 使いすぎ"
+        
+        # --- 予測アラート機能の追加 ---
+        day_of_month = today.day  # 今日は何日目？
+        _, num_days = calendar.monthrange(today.year, today.month)  # 今月は何日まである？
+        
+        avg_per_day = this_month_total / day_of_month # 1日あたりの平均
+        prediction = int(avg_per_day * num_days) # 月末の着地予想
+        
+        msg = f"✅ 記録したよ！\n{item} ({category}): {amount:,}円\n\n"
+        msg += f"📊 今月の合計: {this_month_total:,}円\n"
+        
+        if remaining > 0:
+            msg += f"💰 残予算: あと {remaining:,}円\n"
+        elif remaining == 0:
+            msg += "⚠️ 予算ピッタリ使い切った！\n"
+        else:
+            msg += f"🚨 予算オーバー！ {abs(remaining):,}円 使いすぎ\n"
+
+        # 予測メッセージの追加
+        msg += f"\n💡 着地予想: {prediction:,}円\n"
+        if prediction > budget:
+            msg += "🚨 このままだと予算を超えちゃうよ！少し節約しよう。"
+        else:
+            msg += "✨ いいペース！このままキープしよう。"
+            
         return msg
-    except:
+    except Exception as e:
+        print(f"BUDGET ERROR: {e}")
         return f"✅ 記録完了！\n{item}: {amount:,}円"
 
 # --- 画像メッセージ（レシート）の処理 ---
@@ -242,3 +267,4 @@ def callback():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
+
