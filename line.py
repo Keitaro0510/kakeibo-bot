@@ -3,7 +3,7 @@ from oauth2client.service_account import ServiceAccountCredentials
 from flask import Flask, request, abort, send_from_directory
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError, LineBotApiError
-from linebot.models import MessageEvent, TextMessage, TextSendMessage, ImageSendMessage
+from linebot.models import MessageEvent, TextMessage, TextSendMessage, ImageSendMessage, ImageMessage
 from openai import OpenAI
 from datetime import datetime, timedelta
 import matplotlib
@@ -13,6 +13,7 @@ import japanize_matplotlib
 import io
 import os
 import json
+import base64
 from dotenv import load_dotenv
 
 app = Flask(__name__)
@@ -68,6 +69,79 @@ def create_pie_chart(data, title_text):
     plt.close()
     return buf
 
+# 予算と合計を計算してメッセージを作る共通関数
+def get_budget_message(today, item, category, amount):
+    try:
+        budget = int(sheet.acell('G1').value.replace(',', ''))
+        all_records = sheet.get_all_records()
+        this_month_total = 0
+        for r in all_records:
+            try:
+                r_date = datetime.strptime(str(r.get('日付', '')).split(' ')[0], '%Y/%m/%d')
+                if r_date.year == today.year and r_date.month == today.month:
+                    this_month_total += int(clean_val(r.get('金額', 0)))
+            except: continue
+        
+        remaining = budget - this_month_total
+        msg = f"✅ 記録したよ！\n{item} ({category}): {amount:,}円\n\n📊 今月の合計: {this_month_total:,}円\n"
+        if remaining > 0: msg += f"💰 残予算: あと {remaining:,}円"
+        elif remaining == 0: msg += "⚠️ 予算ピッタリ使い切った！"
+        else: msg += f"🚨 予算オーバー！ {abs(remaining):,}円 使いすぎ"
+        return msg
+    except:
+        return f"✅ 記録完了！\n{item}: {amount:,}円"
+
+# --- 画像メッセージ（レシート）の処理 ---
+@handler.add(MessageEvent, message=ImageMessage)
+def handle_image(event):
+    user_id = event.source.user_id
+    print("DEBUG: 画像を受信しました。レシート解析を開始します。")
+    
+    try:
+        # 1. LINEから画像データを取得
+        message_content = line_bot_api.get_message_content(event.message.id)
+        image_bytes = io.BytesIO(message_content.content).read()
+        base64_image = base64.b64encode(image_bytes).decode('utf-8')
+
+        # 2. OpenAI Vision APIで解析
+        response = client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "このレシートから「店名(項目)」「カテゴリ」「合計金額」を抽出して。形式：項目,カテゴリ,金額 (例: セブンイレブン,食費,540)。カテゴリは食費、日用品、交際費、交通費、趣味、衣服、美容、医療、住居、水道光熱、その他から選んで。1行で回答して。"},
+                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
+                    ],
+                }
+            ],
+            max_tokens=300,
+        )
+
+        # 3. 解析結果を処理
+        ai_res = response.choices[0].message.content.strip()
+        print(f"DEBUG: レシート解析結果: {ai_res}")
+        parts = [p.strip() for p in ai_res.split(',')]
+        
+        if len(parts) >= 3:
+            item = parts[0]
+            category = parts[1]
+            amount = int(clean_val(parts[2]))
+            
+            today = datetime.now()
+            sheet.append_row([today.strftime('%Y/%m/%d'), item, category, amount])
+            
+            # 予算計算を含むメッセージを送信
+            final_msg = get_budget_message(today, item, category, amount)
+            line_bot_api.push_message(user_id, TextSendMessage(text="📸 レシートを読み取ったよ！\n" + final_msg))
+        else:
+            line_bot_api.push_message(user_id, TextSendMessage(text="ごめん、レシートがうまく読めなかったよ。もう一度明るい場所で撮ってみて。"))
+
+    except Exception as e:
+        print(f"IMAGE ERROR: {e}")
+        line_bot_api.push_message(user_id, TextSendMessage(text="画像解析中にエラーが発生しました。"))
+
+# --- テキストメッセージの処理 ---
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
     user_id = event.source.user_id
@@ -76,7 +150,6 @@ def handle_message(event):
     
     try:
         today = datetime.now()
-        # AI判定（カテゴリの具体例を教えて学習させる）
         prompt = f"""
         あなたは優秀な家計簿オーガナイザーです。
         メッセージから「支出項目」「カテゴリ」「金額」を抽出して。
@@ -150,26 +223,8 @@ def handle_message(event):
             amount = int(clean_val(data_parts[3]) if len(data_parts) > 3 else "0")
             sheet.append_row([today.strftime('%Y/%m/%d'), item, category, amount])
 
-            # --- 予算チェック ---
-            try:
-                budget = int(sheet.acell('G1').value.replace(',', ''))
-                all_records = sheet.get_all_records()
-                this_month_total = 0
-                for r in all_records:
-                    try:
-                        r_date = datetime.strptime(str(r.get('日付', '')).split(' ')[0], '%Y/%m/%d')
-                        if r_date.year == today.year and r_date.month == today.month:
-                            this_month_total += int(clean_val(r.get('金額', 0)))
-                    except: continue
-                
-                remaining = budget - this_month_total
-                msg = f"✅ 記録したよ！\n{item} ({category}): {amount:,}円\n\n📊 今月の合計: {this_month_total:,}円\n"
-                if remaining > 0: msg += f"💰 残予算: あと {remaining:,}円"
-                elif remaining == 0: msg += "⚠️ 予算ピッタリ使い切った！"
-                else: msg += f"🚨 予算オーバー！ {abs(remaining):,}円 使いすぎ"
-                line_bot_api.push_message(user_id, TextSendMessage(text=msg))
-            except:
-                line_bot_api.push_message(user_id, TextSendMessage(text=f"✅ 記録完了！\n{item}: {amount:,}円"))
+            final_msg = get_budget_message(today, item, category, amount)
+            line_bot_api.push_message(user_id, TextSendMessage(text=final_msg))
 
     except Exception as e:
         print(f"GENERAL ERROR: {e}")
@@ -187,4 +242,3 @@ def callback():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
-
