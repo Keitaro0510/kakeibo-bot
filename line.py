@@ -72,48 +72,57 @@ def create_pie_chart(data, title_text):
 
 
 
-# 予算と合計を計算してメッセージを作る共通関数
 def get_budget_message(today, item, category, amount):
     try:
         budget = int(sheet.acell('G1').value.replace(',', ''))
         all_records = sheet.get_all_records()
+        
         this_month_total = 0
+        last_month_same_day_total = 0 # 先月の「今日までの」合計用
+        
+        last_month_date = today.replace(day=1) - timedelta(days=1)
+        
         for r in all_records:
             try:
-                r_date = datetime.strptime(str(r.get('日付', '')).split(' ')[0], '%Y/%m/%d')
+                r_date_str = str(r.get('日付', '')).split(' ')[0]
+                r_date = datetime.strptime(r_date_str, '%Y/%m/%d')
+                r_amount = int(clean_val(r.get('金額', 0)))
+                
+                # 今月の合計
                 if r_date.year == today.year and r_date.month == today.month:
-                    this_month_total += int(clean_val(r.get('金額', 0)))
+                    this_month_total += r_amount
+                
+                # 先月の「今日と同じ日」までの合計
+                if r_date.year == last_month_date.year and r_date.month == last_month_date.month:
+                    if r_date.day <= today.day:
+                        last_month_same_day_total += r_amount
             except: continue
         
         remaining = budget - this_month_total
+        diff = this_month_total - last_month_same_day_total # 先月との差
         
-        # --- 予測アラート機能の追加 ---
-        day_of_month = today.day  # 今日は何日目？
-        _, num_days = calendar.monthrange(today.year, today.month)  # 今月は何日まである？
-        
-        avg_per_day = this_month_total / day_of_month # 1日あたりの平均
-        prediction = int(avg_per_day * num_days) # 月末の着地予想
-        
+        # メッセージ構築
         msg = f"✅ 記録したよ！\n{item} ({category}): {amount:,}円\n\n"
         msg += f"📊 今月の合計: {this_month_total:,}円\n"
         
-        if remaining > 0:
-            msg += f"💰 残予算: あと {remaining:,}円\n"
-        elif remaining == 0:
-            msg += "⚠️ 予算ピッタリ使い切った！\n"
-        else:
-            msg += f"🚨 予算オーバー！ {abs(remaining):,}円 使いすぎ\n"
-
-        # 予測メッセージの追加
-        msg += f"\n💡 着地予想: {prediction:,}円\n"
-        if prediction > budget:
-            msg += "🚨 このままだと予算を超えちゃうよ！少し節約しよう。"
-        else:
-            msg += "✨ いいペース！このままキープしよう。"
-            
+        # 過去比較
+        if last_month_same_day_total > 0:
+            if diff > 0:
+                msg += f"📈 先月の今日より {abs(diff):,}円 多いよ（使いすぎ注意！）\n"
+            else:
+                msg += f"📉 先月の今日より {abs(diff):,}円 抑えられてるよ！（ナイス！）\n"
+        
+        # 予測
+        day_of_month = today.day
+        _, num_days = calendar.monthrange(today.year, today.month)
+        prediction = int((this_month_total / day_of_month) * num_days)
+        
+        msg += f"💰 残予算: {remaining:,}円\n"
+        msg += f"💡 月末予想: {prediction:,}円"
+        
         return msg
     except Exception as e:
-        print(f"BUDGET ERROR: {e}")
+        print(f"ERROR: {e}")
         return f"✅ 記録完了！\n{item}: {amount:,}円"
 
 # --- 画像メッセージ（レシート）の処理 ---
@@ -267,4 +276,5 @@ def callback():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
+
 
